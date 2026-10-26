@@ -1,0 +1,5 @@
+{
+  "name": "wl-e2e",
+  "version": "0.1.0",
+  "description": "Playwright E2E 测试流水线:联动挖掘 → 计划 → 生成 → 修复四代理串行,三轮检查与防停滞纪律,项目配置外置(/wl-e2e:init 初始化)"
+}

@@ -1,0 +1,64 @@
+# wl-e2e 插件 — 项目配置默认值模板
+#
+# 用法：`/wl-e2e:init` 会把本模板复制到项目根 `.claude/playwright-test.config.yaml`
+# 并按项目实际探测结果填充。这里全部是脱敏占位值，不含任何真实凭据。
+#
+# 三层优先级（高 → 低）：
+#   1. 会话内覆盖（agent 运行时显式指定）
+#   2. 项目 `.claude/playwright-test.config.yaml`
+#   3. 本文件默认值
+#
+# 敏感值（密码等）不要写明文：值写 `${ENV_NAME}` 引用，实际值放项目根
+# `.env.e2e.local`（已 gitignore），形如：
+#   E2E_PASSWORD=真实密码
+
+# ---- 项目基本信息 ----
+project:
+  name: ""              # 项目名，用于报告标题；空则取目录名
+  language: zh          # 产出文档（计划/联动图）语言
+  pkg_manager: pnpm     # pnpm | npm | yarn | bun（跑 playwright 用 <pm> exec）
+  ui_lib: element-plus  # 主 UI 组件库；表格库另见 known-traps 分节（vxe-table 等）
+
+# ---- 前端 ----
+frontend:
+  root: "."             # 前端仓库根（相对本 config 所在项目根；单体仓多为 "."）
+  vue_dirs:             # Vue SFC 扫描目录（相对 frontend.root），定位组件源码用
+    - src/views
+    - src/components
+  views_root: src/views # 业务页面根（模块定位入口）
+  test_dir: tests/e2e   # Playwright E2E 根目录（计划/联动图/spec 都产在这下面）
+  fixtures_auth: ""     # 登录 fixture/spec 路径（如 tests/e2e/auth/login.spec.ts）；
+                        # 空 → init 生成 references/auth-fixture-template.ts 的副本
+
+# ---- 后端（没有后端仓库可整节留空 → Linkage Miner 输出 REQ-only） ----
+backend:
+  repo_path: ""         # 后端仓库路径（相对 frontend.root，如 ../backend-api）；空 → 跳过 LINK 挖掘
+  module_glob: "**/module-*"  # 后端业务模块目录 glob（在该仓库下匹配 Service/Controller）
+  api_prefix: ""        # REST API 前缀（如 /admin-api）；mock route 与断言 URL 拼接用
+
+# ---- 环境健康探查 ----
+health_check:
+  url: ""               # 探测延迟的目标 URL（被测环境入口）；空 → 跳过 Pre-flight 第 5 条
+  slow_threshold_ms: 3000  # API 单请求超过该值视为「慢窗口」，提示择时重跑
+
+# ---- 登录（storageState 方案） ----
+login:
+  url: ""               # 登录页地址（浏览器打开的完整 URL，含协议与端口）
+  fields:               # 表单字段定位（CSS 或 locator 表达式）
+    username: 'input[name="username"]'
+    password: 'input[type="password"]'
+  submit_button: 'button[type="submit"]'
+  username: "${E2E_USERNAME}"   # 实际值在 .env.e2e.local
+  password: "${E2E_PASSWORD}"   # 实际值在 .env.e2e.local
+  storage_state: tests/e2e/.auth/storage_state.json  # 落盘的登录态文件
+  extra: {}             # 项目额外步骤，如：{ slider_captcha: true, pre_click: 'xxx' }
+
+# ---- DB 直查验证（可选；不可用则纯 API 验证） ----
+db_verify:
+  enabled: false        # true 时联动用例可出 DB 分支（API OR DB 任一过即过）
+  cred_source: ""       # DB 连接信息来源说明（如「后端 application-dev.yaml 的本地 datasource」；
+                        # 或 ${ENV} 引用指向 .env.e2e.local 的 DB_DSN 类变量）。不落真实凭据
+  notes: ""             # 备注：驱动、只读账号建议、状态列存储格式（枚举名 vs 数字码）等
+
+# ---- 项目专属陷阱 ----
+traps_extra: []         # 项目踩到的新陷阱（字符串数组），与插件 known-traps.md 一并粘给生成/修复代理

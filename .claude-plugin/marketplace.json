@@ -1,0 +1,14 @@
+{
+  "name": "scc-plugin-marketplace",
+  "owner": {
+    "name": "justonescc"
+  },
+  "description": "个人 Claude Code 插件市场:Playwright E2E 测试流水线等工程效能插件",
+  "plugins": [
+    {
+      "name": "wl-e2e",
+      "source": "./plugins/wl-e2e",
+      "description": "Playwright E2E 测试流水线:Linkage Miner → Planner → Generator → Healer 四代理串行,含 /wl-e2e:init 项目初始化与三层配置"
+    }
+  ]
+}
