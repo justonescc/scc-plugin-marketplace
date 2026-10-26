@@ -2,6 +2,19 @@
 
 本插件遵循语义化版本：`MAJOR.MINOR.PATCH`。每个版本发布时打 tag `wl-e2e-v<version>`。
 
+## [0.1.1] — 2026-10-26
+
+### 新增
+
+- **浏览器复用检查（防重复下载）**：skill Pre-flight 新增第 1 条三段判断——pinned chromium
+  revision 已在本地则直接用；缺失但本地缓存有其他 `chromium-*` 则通过
+  `E2E_CHROMIUM_EXECUTABLE` + `launchOptions.executablePath` 复用（跨 revision 实测可驱动）；
+  本地一个都没有才 `playwright install chromium`（首次）。协议不匹配兜底：复用启动报
+  CDP 错误时才回退下载。macOS/Linux 缓存路径自适应，`${PKG}` 按包管理器展开。
+- `/wl-e2e:init`：Step 1 新增浏览器可用性探测；生成/检查的 `playwright.config.ts` 要求
+  支持 `E2E_CHROMIUM_EXECUTABLE`；Step 4 冒烟前置浏览器复用检查。
+- Common Mistakes 新增「不检查本地直接 playwright install」条目。
+
 ## [0.1.0] — 2026-10-26
 
 首个版本。从 ERP 项目（Vue 3 + Element Plus + vxe-table 前端 / Java Spring Boot 后端）

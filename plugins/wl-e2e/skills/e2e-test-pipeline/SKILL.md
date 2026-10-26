@@ -66,11 +66,33 @@ description: Use when the user asks to run existing Playwright E2E tests, create
 
 ## Pre-flight（每次必做）
 
-1. **令牌新鲜度**：`<login.storage_state>` 指向的 storage state 文件距上次生成超过 ~30 分钟 → 先删掉它，重跑登录 spec（auth fixture 会重新落盘；登录实现见 `frontend.fixtures_auth`）。refresh-token 有轮换：任何一次刷新后旧文件即失效。
-2. 确认 `playwright.config.ts`：chromium、`headless: false`（用户要看浏览器）、storageState 自动注入。
-3. 定位模块：读 `<views_root>/<域>/` 的 index.vue 与共享组件，记下路由 URL（hash 模式，`#/xxx`）和菜单路径。
-4. **联动资产新鲜度**（仅生成新模式）：`<test_dir>/<模块>/linkage.map.md` 若已存在，检查其头部「模块信息」里的后端 Service 文件与 PRD 版本是否仍是当前版本（后端大改/PRD 换版 → 重跑 Phase 0 增量更新；未变 → 直接复用，跳过 Phase 0）。
-5. **环境健康**（跑测试模式）：测试环境慢窗口（API 单请求超过 `health_check.slow_threshold_ms` / 页面卡加载）会让全量连环超时——先 curl 探 `health_check.url` 延迟，异常时告知用户择时重跑或加 `--retries=2`，不要盲目归因为用例缺陷。
+1. **浏览器复用检查（防重复下载，先于一切测试命令）**：禁止直接跑 `playwright install`。先按下面顺序判断——pinned revision 已在本地就直接用；缺失但本地有其他 chromium 就通过 `E2E_CHROMIUM_EXECUTABLE` 复用；本地一个都没有才允许下载（首次）：
+
+   ```bash
+   cd <frontend.root>
+   PW_DIR="${PLAYWRIGHT_BROWSERS_PATH:-$HOME/Library/Caches/ms-playwright}"
+   [ -d "$PW_DIR" ] || PW_DIR="$HOME/.cache/ms-playwright"   # Linux 回退
+   NEED_REV=$(${PKG} playwright install chromium --dry-run 2>/dev/null | grep -oE 'playwright chromium v[0-9]+' | grep -oE '[0-9]+' | head -1)
+   if [ -f "$PW_DIR/chromium-$NEED_REV/INSTALLATION_COMPLETE" ]; then
+     echo "OK: pinned chromium-$NEED_REV 已在本地，直接运行"
+   else
+     BEST=$(ls -d "$PW_DIR"/chromium-* 2>/dev/null | grep -oE '[0-9]+$' | sort -n | tail -1)
+     if [ -n "$BEST" ]; then
+       export E2E_CHROMIUM_EXECUTABLE=$(find "$PW_DIR/chromium-$BEST" -maxdepth 5 -path "*.app/Contents/MacOS/*" -type f 2>/dev/null | head -1)
+       echo "复用本地 chromium-$BEST（export E2E_CHROMIUM_EXECUTABLE=$E2E_CHROMIUM_EXECUTABLE）"
+     else
+       ${PKG} playwright install chromium   # 仅本地无任何 chromium 时
+     fi
+   fi
+   ```
+
+   其中 `${PKG}` 按 `project.pkg_manager` 展开（pnpm/npm/yarn → `<pm> exec`；bun → `bunx`）。**复用兜底**：若复用启动报协议错误（`Playwright stopped responding` / CDP mismatch，说明本地构建与 Playwright 版本差距过大）→ 此时才 `playwright install chromium` 下载，去掉 env 变量重试。Linux 无 `.app` 布局时，`find` 改查 `-name chrome -o -name headless_shell`。**env 变量是会话级 export**，后续所有测试命令都会继承，无需每条重设。
+
+2. **令牌新鲜度**：`<login.storage_state>` 指向的 storage state 文件距上次生成超过 ~30 分钟 → 先删掉它，重跑登录 spec（auth fixture 会重新落盘；登录实现见 `frontend.fixtures_auth`）。refresh-token 有轮换：任何一次刷新后旧文件即失效。
+3. 确认 `playwright.config.ts`：chromium、`headless: false`（用户要看浏览器）、storageState 自动注入、`launchOptions.executablePath` 读取 `E2E_CHROMIUM_EXECUTABLE`（缺失此项时复用不生效，先补上）。
+4. 定位模块：读 `<views_root>/<域>/` 的 index.vue 与共享组件，记下路由 URL（hash 模式，`#/xxx`）和菜单路径。
+5. **联动资产新鲜度**（仅生成新模式）：`<test_dir>/<模块>/linkage.map.md` 若已存在，检查其头部「模块信息」里的后端 Service 文件与 PRD 版本是否仍是当前版本（后端大改/PRD 换版 → 重跑 Phase 0 增量更新；未变 → 直接复用，跳过 Phase 0）。
+6. **环境健康**（跑测试模式）：测试环境慢窗口（API 单请求超过 `health_check.slow_threshold_ms` / 页面卡加载）会让全量连环超时——先 curl 探 `health_check.url` 延迟，异常时告知用户择时重跑或加 `--retries=2`，不要盲目归因为用例缺陷。
 
 ## Phase 0 — Linkage Miner（playwright-linkage-miner 代理，仅生成新模式且资产缺失/过期时）
 
@@ -155,6 +177,7 @@ description: Use when the user asks to run existing Playwright E2E tests, create
 
 | 错误 | 后果 |
 |------|------|
+| **不检查本地直接 `playwright install`** | 本地已有可用 chromium（其他 revision）仍白下载几百 MB；必须先走 Pre-flight 第 1 条三段判断 |
 | 四个 suite 并行派发生成代理 | 共用单浏览器会话，互相打架 |
 | 生成后直接交付不跑 tsc | `await` 层级错误这类低级 bug 混进去 |
 | 计划里写臆造的 placeholder | 首轮大面积失败 |

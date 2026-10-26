@@ -15,6 +15,7 @@ description: 初始化 wl-e2e 插件的项目配置（探测项目结构 → 生
 5. **登录方式**：找登录页源码（`src/views/Login.vue` 或路由 `/login`）确认字段定位器、有无滑块/验证码（`Verifition`/`captcha` 类组件）、成功跳转判定
 6. **已有配置**：项目根 `.claude/playwright-test.config.yaml`、`.env.e2e.local` 是否已存在
 7. **DB 直查可行性**：后端 dev 配置文件（`application-dev.yaml` 类）里有无 jdbc 数据源；测试机能否连（不确定就标「待验证」，`db_verify.enabled` 先 false）
+8. **浏览器可用性**：探 Playwright 缓存目录（`$HOME/Library/Caches/ms-playwright`，Linux `$HOME/.cache/ms-playwright`，可用 `PLAYWRIGHT_BROWSERS_PATH` 覆盖）下已有哪些 `chromium-<rev>` 目录；跑 `<pkg_manager> exec playwright install chromium --dry-run` 记下 pinned revision。已有任意 chromium → 记「复用模式可用」；一个都没有 → 提示用户首次跑会下载（约 150-300 MB）
 
 ## Step 2 — AskUserQuestion（拿探测结果让用户确认）
 
@@ -33,9 +34,11 @@ description: 初始化 wl-e2e 插件的项目配置（探测项目结构 → 生
 2. **`.env.e2e.local`**：生成骨架（`E2E_USERNAME=`、`E2E_PASSWORD=` 等，值为空），提示用户自行填真实值并确认它在 `.gitignore`
 3. **`.gitignore` 追加**（仅缺失时）：`.env.e2e.local`、`<test_dir>/.auth/`、`test-results/`、`playwright-report/`
 4. **登录 fixture**：若 `frontend.fixtures_auth` 为空且无现成 auth spec → 按插件 `references/auth-fixture-template.ts` 生成 `<test_dir>/fixtures/auth.ts`（`<...>` 占位符替换为 config 值，滑块/验证码段留骨架并注明「参照项目内已有实现补全」）+ `<test_dir>/auth/login.spec.ts`（调 `login(page)` + 断言 URL 离开 /login + 断言 storageState 文件含 token key）
-5. **`playwright.config.ts` 指引**：若项目无此文件 → 生成最小配置（chromium、`headless: false`、`workers: 1`、storageState 条件注入、testDir 指 `<test_dir>`）；已有 → 只检查 storageState 注入与 testDir 是否匹配，不匹配给建议不改文件
+5. **`playwright.config.ts` 指引**：若项目无此文件 → 生成最小配置（chromium、`headless: false`、`workers: 1`、storageState 条件注入、testDir 指 `<test_dir>`、`launchOptions.executablePath: process.env.E2E_CHROMIUM_EXECUTABLE || undefined` 支持本地浏览器复用防重复下载）；已有 → 只检查 storageState 注入、testDir 与 executablePath 支持三项是否匹配，不匹配给建议不改文件
 
 ## Step 4 — 冒烟指引（生成完给用户可复制的命令清单）
+
+先做浏览器复用检查（pinned revision 已在本地则直接跑；缺失但有其他本地 chromium 则先 `export E2E_CHROMIUM_EXECUTABLE=<该版本可执行文件路径>` 再跑，详见 skill Pre-flight 第 1 条；本地一个都没有才 `<pkg_manager> exec playwright install chromium`）：
 
 ```bash
 # 1. 填凭据
