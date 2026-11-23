@@ -1,6 +1,6 @@
 # scc-plugin-marketplace
 
-个人 Claude Code 插件市场（Private）。当前提供 **wl-e2e** —— Playwright E2E 测试流水线插件。
+个人 Claude Code 插件市场（Private）。当前提供 **wl-e2e**（Playwright E2E 测试流水线）与 **wechat-publisher**（公众号自动写稿发布）。
 
 ## 插件：wl-e2e
 
@@ -50,11 +50,40 @@
 - **项目专属陷阱**：写进 config 的 `traps_extra`，与插件内置 `known-traps.md` 一并生效；跑绿后沉淀回插件（提 PR + 更新 CHANGELOG）
 - **版本**：插件版本见 `plugins/wl-e2e/.claude-plugin/plugin.json`；每个版本改动记录在 `plugins/wl-e2e/CHANGELOG.md`；tag 命名 `wl-e2e-v*`
 
+## 插件：wechat-publisher
+
+微信公众号自动写稿与发布一条龙：**按账号定位写稿 → 违禁词自检 → Markdown 转公众号内联样式 HTML →
+Playwright 有头浏览器写入公众号后台草稿箱**。群发永远由用户人工点击，脚本绝不自动群发。
+
+### 安装
+
+```bash
+/plugin install wechat-publisher@scc-plugin-marketplace
+```
+
+装完先装一次 npm 依赖（在插件缓存目录的 `skills/wechat-publisher/` 下）：
+
+```bash
+cd ~/.claude/plugins/cache/scc-plugin-marketplace/wechat-publisher/*/skills/wechat-publisher
+npm install --registry=https://registry.npmmirror.com
+```
+
+### 设计要点
+
+- **运行状态外置**：账号定位（`profile.yaml`）、公众号登录态（`mp-storage.json`）、草稿与截图全在
+  `~/.wechat-publisher/`，插件升级/重装不丢状态、不用重新扫码
+- **静态资产随插件走**：违禁词表（`config/banned_words.txt`）与配置模板（`profile.yaml.example`）
+  在插件内，改词表改模板提 PR 沉淀回本仓库
+- Playwright 锁 `1.60.0`，复用本机 chromium 缓存，零浏览器下载
+
 ## 仓库结构
 
 ```
-.claude-plugin/marketplace.json     # 市场清单（后续新插件按 plugins/<name>/ 平铺）
-plugins/wl-e2e/                     # wl-e2e 插件本体
+.claude-plugin/marketplace.json         # 市场清单（后续新插件按 plugins/<name>/ 平铺）
+plugins/wl-e2e/                         # wl-e2e 插件本体
   .claude-plugin/plugin.json
   agents/  commands/  skills/  references/
+plugins/wechat-publisher/               # wechat-publisher 插件本体
+  .claude-plugin/plugin.json
+  skills/wechat-publisher/              # SKILL.md + scripts + config（运行状态外置 ~/.wechat-publisher）
 ```

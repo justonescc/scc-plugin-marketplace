@@ -3,12 +3,17 @@
   "owner": {
     "name": "justonescc"
   },
-  "description": "个人 Claude Code 插件市场:Playwright E2E 测试流水线等工程效能插件",
+  "description": "个人 Claude Code 插件市场:Playwright E2E 测试流水线、公众号自动发布等工程效能插件",
   "plugins": [
     {
       "name": "wl-e2e",
       "source": "./plugins/wl-e2e",
       "description": "Playwright E2E 测试流水线:Linkage Miner → Planner → Generator → Healer 四代理串行,含 /wl-e2e:init 项目初始化与三层配置"
+    },
+    {
+      "name": "wechat-publisher",
+      "source": "./plugins/wechat-publisher",
+      "description": "微信公众号自动写稿与发布:定位写稿 → 违禁词自检 → Markdown 转公众号 HTML → Playwright 写入草稿箱,群发永远人工点击"
     }
   ]
 }

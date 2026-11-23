@@ -1,0 +1,14 @@
+node_modules/
+package-lock.json
+
+# 登录态 cookie —— 绝不能提交
+config/mp-storage.json
+
+# 个人账号定位配置（提交模板 example 即可）
+config/profile.yaml
+
+# 本地产物
+drafts/
+*.png
+*.log
+.DS_Store

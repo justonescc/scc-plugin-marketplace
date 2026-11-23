@@ -1,0 +1,17 @@
+# 公众号定位配置 —— 四个 TODO 填完才能开写
+# 填法：直接改本文件，或在对话里告诉 Claude（它会帮你写入）
+
+name: TODO-账号名称            # 公众号名称
+position: TODO-账号定位        # 写什么主题、提供什么价值，一句话
+audience: TODO-目标读者        # 给谁看
+style: TODO-语言风格           # 如：轻松幽默 / 专业干货 / 温暖讲故事
+pen_name: ""                   # 文章署名（笔名），可留空
+frequency: TODO-更新频率       # 如：每周 2-3 篇
+
+# 风格范文：URL 或本地路径，2~5 篇，用于 few-shot 对齐文风
+samples: []
+#  - https://mp.weixin.qq.com/s/xxxx
+#  - /path/to/sample.md
+
+# 账号专属补充禁用词（通用违禁词见 banned_words.txt）
+banned_extra: []
