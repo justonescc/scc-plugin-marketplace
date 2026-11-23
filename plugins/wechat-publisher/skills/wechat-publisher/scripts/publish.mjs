@@ -2,6 +2,7 @@
 // 把排版好的 HTML 写入微信公众号后台「草稿箱」（不群发！群发永远人工点）
 // 用法: node publish.mjs <article.html> --title "标题" [--digest "摘要"] [--author "笔名"] [--cover /path/封面] [--headless]
 // v2: 适配新版图文编辑器（真实剪贴板 Cmd+V 粘贴、「保存为草稿」按钮、contenteditable 标题）
+// v3: 安全策略——不保存任何登录凭证（登录态不落盘），每次发布都要求管理员微信扫码
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -9,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SKILL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-// 登录态/截图等运行状态外置到 ~/.wechat-publisher，插件升级重装不丢失
+// 截图等运行状态外置到 ~/.wechat-publisher，插件升级重装不丢失（登录凭证例外：不保存，每次扫码）
 const DATA = path.join(os.homedir(), '.wechat-publisher');
 const args = process.argv.slice(2);
 const htmlFile = args[0];
@@ -26,34 +27,27 @@ const headless = args.includes('--headless');
 
 fs.mkdirSync(path.join(DATA, 'config'), { recursive: true });
 fs.mkdirSync(path.join(DATA, 'drafts'), { recursive: true });
-const storagePath = path.join(DATA, 'config', 'mp-storage.json');
 const shotPath = path.join(DATA, 'drafts', `publish-${Date.now()}.png`);
 const html = fs.readFileSync(htmlFile, 'utf8');
 const probe = html.replace(/<[^>]+>/g, '').replace(/\s+/g, '').slice(0, 12); // 正文开头纯文本，用于验证粘贴
 const log = (...a) => console.log('[发布]', ...a);
 
 const browser = await chromium.launch({ headless });
+// 全新无痕 context：不带任何历史 cookie/localStorage，每次都是干净登录
 const ctx = await browser.newContext({
   viewport: { width: 1280, height: 900 },
-  storageState: fs.existsSync(storagePath) ? storagePath : undefined,
 });
 await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'https://mp.weixin.qq.com' });
 const page = await ctx.newPage();
 
-// 1) 打开后台，检查登录态
+// 1) 打开后台等扫码（每次发布都强制扫码，不在本地留下任何登录凭证）
 log('打开 mp.weixin.qq.com …');
 await page.goto('https://mp.weixin.qq.com/', { waitUntil: 'domcontentloaded' });
-const hasLoginQr = (await page.$('#login, iframe[src*="login"], .login__type__container__scan')) !== null
-  || (await page.content()).includes('扫码登录');
-if (hasLoginQr) {
-  log('⚠️  登录态失效：请在浏览器窗口里用管理员微信扫码（等 120 秒）…');
-  try {
-    await page.waitForURL(/cgi-bin\/home|cgi-bin\/framewolf|apppage/, { timeout: 120_000 });
-    log('扫码登录成功 ✓');
-  } catch { await die('等待扫码超时'); }
-}
-await ctx.storageState({ path: storagePath });
-log('登录态已保存');
+log('🔑 请在浏览器窗口里用管理员微信扫码登录（等 180 秒），扫码后记得在手机上确认…');
+try {
+  await page.waitForURL(/cgi-bin\/home|cgi-bin\/framewolf|apppage/, { timeout: 180_000 });
+  log('扫码登录成功 ✓（会话仅存在于本次运行内存中，不落盘）');
+} catch { await die('等待扫码超时'); }
 
 // 2) 进入图文编辑页
 let token = await page.evaluate(() => {
