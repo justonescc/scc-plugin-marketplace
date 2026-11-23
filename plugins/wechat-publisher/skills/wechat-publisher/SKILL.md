@@ -49,7 +49,7 @@ pbcopy < "$WP_DATA/drafts/xxx.html"
 ## 3. 发布（写入公众号后台草稿箱）
 
 ```bash
-node "$SKILL/scripts/publish.mjs" "$WP_DATA/drafts/xxx.html" --title "标题" --digest "摘要" [--author "笔名"] [--cover /path/to/封面图]
+node "$SKILL/scripts/publish.mjs" "$WP_DATA/drafts/xxx.html" --title "标题" --digest "摘要" [--author "笔名"] [--cover 封面] [--img-top 文首配图] [--img-end 文末配图]
 ```
 
 行为与注意：
@@ -61,10 +61,14 @@ node "$SKILL/scripts/publish.mjs" "$WP_DATA/drafts/xxx.html" --title "标题" --
 - **任何情况下不代替用户点「群发」按钮**。
 - 脚本失败（公众号改版等）：改用 playwright MCP 工具交互式完成同样步骤（登录 → 新建图文 → 填标题/正文 → 保存草稿），并顺手修 `publish.mjs` 里失效的选择器（修完把改动沉淀回插件仓库）。
 
-## 4. 封面（可选）
+## 4. 封面与配图（可选）
 
-- 用户给了 `--cover` 就直接传；没给则提醒用户在保存弹窗里手动选封面，或让用户提供图片路径。
-- 封面尺寸：大图 2.35:1（900×383），小图 1:1。
+- 封面：用户给了 `--cover` 就直接传；没给则提醒用户在「封面和摘要」区手动选封面，或让用户提供图片路径。尺寸：大图 2.35:1（900×383），小图 1:1。
+  - 真实交互（实测）：封面区 `#js_cover_area`（「拖拽或选择封面」）点击后弹出四选项——**从正文选择 / 从图片库选择 / 微信扫码上传 / 一键生成封面**。脚本走「从图片库选择」（`.js_imagedialog`）→ 图片库弹层上传。**没有本地直传封面的入口**，不要再去猜 `上传封面` 按钮。
+  - 成功判据：封面区出现预览图（`#js_cover_area img` / `.js_cover_preview_new img`）。上传后没看到预览就报失败并导出 `probe-cover-*.json`，不要误报成功。
+- 正文配图：需要信息卡类配图时，Claude 用 HTML 排版出卡（贴合选题的风格，存 `$WP_DATA/drafts/cards/`）→ playwright 以 deviceScaleFactor 2 截 PNG → 发布时 `--img-top`（文首）/ `--img-end`（文末）传入。
+  - 插图两种方案：工具栏「图片」按钮 + filechooser；失败则剪贴板写入 PNG 后 Cmd+V 粘贴（ProseMirror 支持）。**成功判据是编辑区 `.ProseMirror img` 数量增加**，没增加就提示手动插入。
+- 注意：真实游戏截图在开服前拿不到，可先发信息卡版，开服后再补截图版。
 
 ## 5. 数据回采（人工）
 
