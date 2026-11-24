@@ -34,6 +34,14 @@ const imgEnd = opt('img-end');
 const originalAuthor = opt('original'); // 传了就声明文字原创，作者名≤8字
 const aiSource = args.includes('--ai-source'); // 创作来源标「内容由AI生成」
 const headless = args.includes('--headless');
+// v6.5: --resume <url|url文件路径> 直达已有草稿续编（上次失败 die 存的 -url.txt）。
+//       续编幂等：正文/标题/摘要/封面/原创/AI来源已设置的部分自动跳过，不会重复插图（不传 --img-* 即可）。
+const resumeArg = opt('resume');
+let resumeUrl = resumeArg || null;
+if (resumeUrl && !/^https?:/.test(resumeUrl) && fs.existsSync(resumeUrl)) {
+  resumeUrl = fs.readFileSync(resumeUrl, 'utf8').trim().split('\n')[0] || null; // 支持 --resume xxx-url.txt
+}
+if (resumeUrl && !/^https?:/.test(resumeUrl)) resumeUrl = null;
 
 fs.mkdirSync(path.join(DATA, 'config'), { recursive: true });
 fs.mkdirSync(path.join(DATA, 'drafts'), { recursive: true });
@@ -60,13 +68,21 @@ try {
 } catch { await die('等待扫码超时'); }
 
 // 2) 进入图文编辑页
-let token = await page.evaluate(() => {
+// v6.5: --resume 续编直达——先扫码恢复登录态，再直接打开上次失败时存下的草稿编辑 URL
+let token = resumeUrl ? '' : await page.evaluate(() => {
   try {
     const w = window.wx?.commonData;
     return w?.data?.t || w?.token || new URLSearchParams(location.search).get('token') || '';
   } catch { return ''; }
 });
-if (token) {
+if (resumeUrl) {
+  log('续编模式：直达已有草稿 ' + resumeUrl.slice(0, 80) + '…');
+  await page.goto(resumeUrl, { waitUntil: 'domcontentloaded' });
+  try {
+    await page.waitForSelector('.ProseMirror, #title, div[contenteditable="true"]', { state: 'visible', timeout: 30_000 });
+    log('已进入续编草稿 ✓');
+  } catch { await die('续编直达后没找到编辑区（URL 可能已过期，去掉 --resume 直接重跑）'); }
+} else if (token) {
   log('拿到 token，直达编辑器 …');
   await page.goto(`https://mp.weixin.qq.com/cgi-bin/appmsg?t=media/appmsg_edit_v2&action=edit&type=77&token=${token}&lang=zh_CN`, { waitUntil: 'domcontentloaded' });
   try {
@@ -80,7 +96,11 @@ if (token) {
         if (await b.isVisible({ timeout: 1500 }).catch(() => false)) { await b.click({ timeout: 3_000 }); clicked = true; log('已点「' + sel + '」'); break; }
       } catch {}
     }
-    if (!clicked) log('没找到入口，请在浏览器窗口里手动点：「新的创作」→「写新图文」（等 120 秒）…');
+    if (!clicked) {
+      // v6.4: 连续两次发布都要人工点入口——导出首页结构供离线分析，修选择器不用再等下次踩坑
+      log('没找到入口，请在浏览器窗口里手动点：「新的创作」→「写新图文」（等 120 秒）…');
+      await dumpProbe('entry');
+    }
     try { await page.waitForURL(/appmsg|edit/, { timeout: 120_000 }); }
     catch { await die('等待进入编辑页超时'); }
   }
@@ -112,7 +132,15 @@ const titleCandidates = [
   'form input[type="text"]',
 ];
 let titleOk = false;
-for (const sel of titleCandidates) {
+// v6.5: 续编幂等——标题已有内容则跳过，避免重跑时叠在旧标题后面
+const titleFilled = resumeUrl ? await page.evaluate(() => {
+  const el = document.querySelector('#title, div[contenteditable="true"][data-placeholder*="标题"], input[placeholder*="标题"]');
+  return !!el && (el.textContent || el.value || '').trim().length > 0;
+}) : false;
+if (titleFilled) {
+  titleOk = true;
+  log('标题已存在 ✓（续编跳过）');
+} else for (const sel of titleCandidates) {
   try {
     const el = page.locator(sel).first();
     if (!(await el.isVisible({ timeout: 1500 }))) continue;
@@ -178,21 +206,34 @@ async function pasteInto(locator, label) {
     await navigator.clipboard.write([item]);
   }, html);
   await page.keyboard.press('Meta+V');
-  await page.waitForTimeout(2500);
-  const ok = await contentContains(probe);
+  // v6.5: 固定等 2.5s 改为轮询——渲染完成即返回，通常 <1s
+  let ok = false;
+  for (let i = 0; i < 13 && !ok; i++) { ok = await contentContains(probe); if (!ok) await page.waitForTimeout(200); }
   if (ok) log(`正文已粘贴 ✓（经 ${label}）`);
   return ok;
 }
 async function contentContains(text) {
+  // v6.1: 页面渲染文本带空格（如「让 AI 帮你写…」），probe 已去空白，
+  // 直接 includes/getByText 永远不匹配 → 粘贴成功也被误判失败。
+  // 改为对页面文本做同样的空白归一化后再比对。
   for (const frame of [page.mainFrame(), ...page.frames().filter(f => f !== page.mainFrame())]) {
     try {
-      if (await frame.getByText(text.slice(0, 8), { exact: false }).first().isVisible({ timeout: 1500 })) return true;
+      const ok = await frame.evaluate(
+        (t) => ((document.body && document.body.innerText) || '').replace(/\s+/g, '').includes(t),
+        text
+      );
+      if (ok) return true;
     } catch {}
   }
   return false;
 }
 let pasted = false;
-try {
+// v6.5: 续编幂等——正文已含本文开头则跳过粘贴，避免重跑时全文叠两遍
+if (resumeUrl && probe && (await contentContains(probe))) {
+  pasted = true;
+  log('正文已存在 ✓（续编跳过粘贴）');
+}
+if (!pasted) try {
   // 尝试 1：iframe 编辑器（ueditor 等）
   const editFrames = page.frames().filter(f => f !== page.mainFrame() && /ueditor|editor/i.test(f.url()));
   for (const f of editFrames) {
@@ -209,7 +250,11 @@ try {
 if (!pasted) {
   log('⚠️  自动粘贴未确认成功：请在正文区手动 Cmd+V 粘贴（剪贴板里已有排版 HTML），等待正文出现…（最多 180 秒）');
   try {
-    await page.waitForFunction((t) => document.body.innerText.includes(t), probe, { timeout: 180_000 });
+    await page.waitForFunction(
+      (t) => document.body.innerText.replace(/\s+/g, '').includes(t),
+      probe,
+      { timeout: 180_000 }
+    );
     log('检测到正文 ✓（手动粘贴成功）');
   } catch { await die('正文始终未出现'); }
 }
@@ -247,8 +292,10 @@ async function uploadImg(imgPath, atTop) {
         log(`（方案A图片按钮不可用: ${(e.message || '').slice(0, 60)}）`);
       }
     }
-    await page.waitForTimeout(4000); // 等上传+插入
-    if (await countImgs() > before) {
+    // v6.5: 固定等 4s 改为轮询图片数量——插入完成即返回（最多 4s）
+    let inserted = false;
+    for (let i = 0; i < 8 && !inserted; i++) { inserted = (await countImgs()) > before; if (!inserted) await page.waitForTimeout(500); }
+    if (inserted) {
       await page.keyboard.press('Escape'); // 关掉可能残留的上传弹层
       log(`配图已插入 ✓（${where}）`);
       return;
@@ -265,8 +312,10 @@ async function uploadImg(imgPath, atTop) {
       await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
     }, b64);
     await page.keyboard.press('Meta+V');
-    await page.waitForTimeout(5000);
-    if (await countImgs() > before) log(`配图已插入 ✓（${where}，剪贴板方案）`);
+    // v6.5: 固定等 5s 改为轮询（最多 5s）
+    let pasted2 = false;
+    for (let i = 0; i < 10 && !pasted2; i++) { pasted2 = (await countImgs()) > before; if (!pasted2) await page.waitForTimeout(500); }
+    if (pasted2) log(`配图已插入 ✓（${where}，剪贴板方案）`);
     else { log(`⚠️  ${where}配图未确认插入，请手动插入: ${imgPath}`); await dumpProbe('img-' + where); }
   } catch (e) {
     log(`⚠️  ${where}配图自动上传失败，请手动插入: ${imgPath}（${(e.message || '').slice(0, 80)}）`);
@@ -295,10 +344,13 @@ async function uploadCover(cover) {
   for (const sel of ['#js_cover_area', '.js_cover_btn_area', '.select-cover__mask']) {
     try {
       await page.locator(sel).first().click({ timeout: 5_000 });
-      await page.waitForTimeout(1500);
-      opened = await page.evaluate(() =>
-        [...document.querySelectorAll('a.pop-opr__button.js_imagedialog')].some((a) => a.offsetParent !== null)
-      );
+      // v6.5: 固定等 1.5s 改为轮询弹层出现（200ms×8，出现即走）
+      for (let i = 0; i < 8 && !opened; i++) {
+        await page.waitForTimeout(200);
+        opened = await page.evaluate(() =>
+          [...document.querySelectorAll('a.pop-opr__button.js_imagedialog')].some((a) => a.offsetParent !== null)
+        );
+      }
       if (opened) break;
     } catch {}
   }
@@ -323,16 +375,24 @@ async function uploadCover(cover) {
     return;
   }
 
-  // 记录上传前的图片列表项数量，上传完成后靠数量变化判断
+  // 记录上传前的图片列表项数量与 src 集合：数量变化判断上传完成，src 差集找出新图（防选错旧图）
   const countBefore = await page.evaluate(() => document.querySelectorAll('.weui-desktop-img-picker__item').length);
+  const srcsBefore = await page.evaluate(() =>
+    [...document.querySelectorAll('.weui-desktop-img-picker__item img')].map((i) => i.getAttribute('src'))
+  );
 
   // v5 关键修复：WebUploader 会动态生成 <label> 盖住「上传文件」按钮，任何真实点击都会报
   //     "intercepts pointer events" 并无限重试。绕过方式：程序化 click 它包裹的 file input
   //     （accept 含 image/png、藏在 div[id^=rt_rt_] 里的那个）来触发 filechooser。
+  // v6.2 修复：必须排除正文插图框（li#js_editor_insertimage）下的 file input——
+  //     盲取 inputs[length-1] 会命中它，把封面图直接插进正文（v6.2 实测踩坑）。
+  //     注意 waitForEvent 必须先注册再触发 click，否则 filechooser 事件会漏掉（竞态）。
   const chooserP = page.waitForEvent('filechooser', { timeout: 10_000 }).catch(() => null);
   const triggered = await page.evaluate(() => {
     const inputs = [...document.querySelectorAll('input[type="file"]')];
-    const t = inputs.find((i) => (i.accept || '').includes('image/png')) || inputs[inputs.length - 1];
+    const inEditor = (i) => !!i.closest('#js_editor_insertimage');
+    const t = inputs.find((i) => (i.accept || '').includes('image/png') && !inEditor(i))
+           || [...inputs].reverse().find((i) => !inEditor(i));
     if (!t) return false;
     t.click();
     return true;
@@ -342,9 +402,11 @@ async function uploadCover(cover) {
   if (chooser) {
     await chooser.setFiles(cover).catch(() => {});
   } else {
-    // 兜底：setInputFiles 不依赖 filechooser 事件（input 视觉隐藏也能设值）
+    // 兜底：setInputFiles 不依赖 filechooser 事件（input 视觉隐藏也能设值），同样排除正文插图框
     try {
-      await page.locator('input[type="file"][accept*="image/png"]').last().setInputFiles(cover, { timeout: 5_000 });
+      await page.locator('input[type="file"][accept*="image/png"]')
+        .filter({ hasNot: page.locator('#js_editor_insertimage') }).last()
+        .setInputFiles(cover, { timeout: 5_000 });
     } catch {}
   }
 
@@ -362,18 +424,34 @@ async function uploadCover(cover) {
   }
   log('封面图片已上传到图片库 ✓');
 
-  // 选中刚上传的图（优先按文件名匹配，fallback 列表第一项=最新上传），再点「下一步」
+  // v6.2 修复：选中「刚上传的那张」——按上传前后 src 差集找新图，文件名匹配仅作兜底。
+  //     旧逻辑 fallback 盲选列表第一项，图片库里有历史图时会选中旧图
+  //     （v6.2 实测：封面被选成上一篇的旧封面卡）。认不出新图就报失败，绝不盲选。
   const fname = path.basename(cover);
-  await page.evaluate((name) => {
+  let newSrc = '';
+  const picked = await page.evaluate(({ name, befores }) => {
     const items = [...document.querySelectorAll('.weui-desktop-img-picker__item')].filter((i) => i.offsetParent !== null);
-    const hit = items.find((i) => i.textContent.includes(name)) || items[0];
-    if (hit) (hit.querySelector('img') || hit).click();
-  }, fname);
-  await page.waitForTimeout(800);
+    const isNew = (i) => {
+      const img = i.querySelector('img');
+      return img && !befores.includes(img.getAttribute('src'));
+    };
+    const hit = items.find(isNew) || items.find((i) => i.textContent.includes(name));
+    if (!hit) return null;
+    (hit.querySelector('img') || hit).click();
+    const img = hit.querySelector('img');
+    return img ? img.getAttribute('src') : '';
+  }, { name: fname, befores: srcsBefore });
+  if (!picked) {
+    log('⚠️  图片库里没认出刚上传的封面（为防选错图已放弃盲选），请手动选封面');
+    await dumpProbe('cover-pick');
+    return;
+  }
+  newSrc = picked;
+  await page.waitForTimeout(400); // 选中态是同步 class 切换，短等即可
   const nextBtn = page.locator('.weui-desktop-dialog button:has-text("下一步")').first();
   if (await nextBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
     await nextBtn.click({ timeout: 5_000 });
-    await page.waitForTimeout(1500);
+    // v6.5: 删掉固定等 1.5s——下方 confirmBtn.waitFor(visible) 本身就是条件等待，重复等待
   }
 
   // 裁剪确认（弹层切到「编辑封面」，底部「确认」；默认裁剪框即全图，直接确认）
@@ -384,10 +462,27 @@ async function uploadCover(cover) {
   } catch {}
 
   // 成功判定：封面预览图出现，或封面区出现「修改/换一张」（已设封面态）
-  await page.waitForTimeout(3000);
-  const ok = (await coverPreviewVisible()) ||
-    (await page.evaluate(() => (((document.querySelector('#js_cover_area') || {}).textContent || '')).includes('换一张')));
-  if (ok) { log('封面已上传 ✓（图片库→裁剪确认）'); return; }
+  // v6.2: 预览出现还不够——再比对预览 src 与刚上传图的 src 前缀，选错旧图时告警而非静默成功
+  // v6.5: 固定等 3s 改为轮询——预览出现即返回（最多 3s）
+  let ok = false;
+  for (let i = 0; i < 10 && !ok; i++) {
+    ok = (await coverPreviewVisible()) ||
+      (await page.evaluate(() => (((document.querySelector('#js_cover_area') || {}).textContent || '')).includes('换一张')));
+    if (!ok) await page.waitForTimeout(300);
+  }
+  if (ok) {
+    const coverSrc = await page.evaluate(() => {
+      const img = document.querySelector('#js_cover_area img, .js_cover_preview_new img, .select-cover__preview img');
+      return img ? img.getAttribute('src') : '';
+    });
+    const base = (u) => (u || '').split('?')[0];
+    if (coverSrc && newSrc && base(coverSrc) !== base(newSrc)) {
+      log(`⚠️  封面预览与刚上传的图不一致（可能选了旧图），请人工核对封面！预览=${base(coverSrc)} 新图=${base(newSrc)}`);
+    } else {
+      log('封面已上传 ✓（图片库→裁剪确认）');
+    }
+    return;
+  }
   log('⚠️  图片库上传后未看到封面预览');
   await dumpProbe('cover-imglib');
 }
@@ -395,7 +490,21 @@ async function uploadCover(cover) {
 // 6) 摘要（新版在「设置」里，先试常见输入框）
 if (digest) {
   const digestBox = page.locator('#digest, textarea[placeholder*="摘要"], textarea[placeholder*="选填"]').first();
-  try { await digestBox.fill(digest, { timeout: 8_000 }); log('摘要已填 ✓'); } catch { log('（摘要输入框未找到，可在保存弹窗里填）'); }
+  // v6.5: 续编幂等——已有非空摘要则跳过；顺带回读校验（v6.5 发布时摘要预览计数显示 0/120，存疑待验证）
+  let skip = false;
+  if (resumeUrl) {
+    const cur = await digestBox.inputValue({ timeout: 3_000 }).catch(() => '');
+    skip = !!cur.trim();
+    if (skip) log('摘要已存在 ✓（续编跳过）');
+  }
+  if (!skip) {
+    try {
+      await digestBox.fill(digest, { timeout: 8_000 });
+      const back = await digestBox.inputValue({ timeout: 2_000 }).catch(() => '');
+      if (back.trim() === digest.trim()) log('摘要已填 ✓（回读一致）');
+      else log('摘要已填 ✓（回读不一致，后台留意）');
+    } catch { log('（摘要输入框未找到，可在保存弹窗里填）'); }
+  }
 }
 
 // 6.5) 原创声明（--original "作者名"）：设置区「未声明」→ 文字原创 + 作者 + 勾协议 + 确定。
@@ -408,14 +517,21 @@ async function declareOriginal(authorName) {
     return;
   }
   await undeclared.click({ timeout: 5_000 });
-  await page.waitForTimeout(1500);
+  // v6.5: 固定等 1.5s 改为轮询弹层 checkbox 出现（200ms×8）
+  for (let i = 0; i < 8; i++) {
+    const cbVisible = await page.evaluate(() =>
+      [...document.querySelectorAll('input[type=checkbox]')].some((c) => c.offsetParent !== null)
+    );
+    if (cbVisible) break;
+    await page.waitForTimeout(200);
+  }
   // 勾「我已阅读并同意《微信公众平台原创声明及相关功能使用协议》」
   await page.evaluate(() => {
     const cbs = [...document.querySelectorAll('input[type=checkbox]')].filter((c) => c.offsetParent !== null);
     const cb = cbs.find((c) => { const box = c.closest('div, p, label, td'); return box && /原创声明及相关功能使用协议/.test(box.textContent || ''); }) || cbs[0];
     if (cb && !cb.checked) cb.click();
   });
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(300); // v6.5: 500→300，同步勾选状态
   // 作者栏（≤8字），填完补事件链让校验 state 生效
   const inp = page.locator('#js_original_edit_box input[placeholder="请输入作者"]');
   try {
@@ -429,13 +545,13 @@ async function declareOriginal(authorName) {
       e.blur();
     });
   } catch { log('⚠️  原创作者栏填写失败，请后台手动补'); }
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(300); // v6.5: 500→300
   // 「确定」可能触发协议确认层，循环点两次
   for (let i = 0; i < 2; i++) {
     const ok = page.locator('button:has-text("确定")').first();
     if (await ok.isVisible({ timeout: 3_000 }).catch(() => false)) {
       await ok.click({ timeout: 3_000 }).catch(() => {});
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(500); // v6.5: 1500→500，下一轮 isVisible(3s) 自带等待兜底
     }
   }
   const done = await page.evaluate(() => /已声明|已开启快捷转载/.test(document.body.textContent));
@@ -444,31 +560,58 @@ async function declareOriginal(authorName) {
 }
 
 // 6.6) 创作来源（--ai-source）：标「内容由AI生成」。v6 实测：radio 选中后必须点弹层内
-//      「确认」保存，Escape/外点会丢选择；「未添加」行定位用「创作来源」叶子文本上溯，不数序号。
+//      「确认」保存，Escape/外点会丢选择；「未添加」行定位用「创作来源」文本上溯，不数序号。
+// v6.3 修复：行定位不能要求叶子元素（children.length === 0）——「创作来源」旁带 tooltip
+//      问号图标（svg/i 子元素），叶子判据必失败，报「没找到创作来源设置行」但行明明可见。
+//      改为「文本以『创作来源』开头且可见」的元素中取文本最短者（最小元素），再上溯设置行。
+function aiSourceRowLocateExpr() {
+  return `
+    (function () {
+      const cands = [...document.querySelectorAll('*')].filter((e) =>
+        e.offsetParent !== null && /^创作来源/.test((e.textContent || '').trim())
+      );
+      if (!cands.length) return null;
+      const label = cands.sort((a, b) => a.textContent.length - b.textContent.length)[0];
+      return label.closest('[class*="item"], [class*="row"], [class*="setting"], td') || label.parentElement.parentElement;
+    })()
+  `;
+}
 async function declareAiSource() {
-  const opened = await page.evaluate(() => {
-    const label = [...document.querySelectorAll('*')].find((e) => e.offsetParent !== null && e.children.length === 0 && e.textContent.trim() === '创作来源');
-    if (!label) return false;
-    const row = label.closest('[class*="item"], [class*="row"], [class*="setting"], td') || label.parentElement.parentElement;
-    const target = [...row.querySelectorAll('*')].reverse().find((e) => e.offsetParent !== null && /未添加|未设置/.test(e.textContent.trim()) && e.children.length <= 1) || label;
+  // v6.5: 幂等——已标「内容由AI生成」的（--resume 续编场景）直接跳过，不再点开弹层
+  const already = await page.evaluate(new Function(`
+    const row = (${aiSourceRowLocateExpr()});
+    return !!row && /内容由AI生成/.test(row.textContent || '');
+  `));
+  if (already) { log('创作来源已是「内容由AI生成」✓（跳过）'); return; }
+  const opened = await page.evaluate(new Function(`
+    const row = (${aiSourceRowLocateExpr()});
+    if (!row) return false;
+    const target = [...row.querySelectorAll('*')].reverse().find((e) => e.offsetParent !== null && /未添加|未设置/.test((e.textContent || '').trim()) && e.children.length <= 2) || row;
     target.click();
     return true;
-  });
+  `));
   if (!opened) { log('⚠️  没找到创作来源设置行'); return; }
-  await page.waitForTimeout(1500);
+  // v6.5: 固定等 1.5s 改为轮询选项出现（200ms×10）
+  let optVisible = false;
+  for (let i = 0; i < 10 && !optVisible; i++) {
+    optVisible = await page.locator('text=内容由AI生成').first().isVisible({ timeout: 200 }).catch(() => false);
+    if (!optVisible) await page.waitForTimeout(200);
+  }
   try {
     await page.locator('text=内容由AI生成').click({ timeout: 8_000 });
   } catch { log('⚠️  「内容由AI生成」选项没找到'); return; }
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(300); // v6.5: 500→300
   const ok = page.locator('button:has-text("确认")').first();
   if (await ok.isVisible({ timeout: 5_000 }).catch(() => false)) await ok.click({ timeout: 5_000 }).catch(() => {});
-  await page.waitForTimeout(1500);
-  const saved = await page.evaluate(() => {
-    const label = [...document.querySelectorAll('*')].find((e) => e.offsetParent !== null && e.children.length === 0 && e.textContent.trim() === '创作来源');
-    if (!label) return false;
-    const row = label.closest('[class*="item"], [class*="row"], [class*="setting"], td') || label.parentElement.parentElement;
-    return /内容由AI生成/.test(row.textContent || '');
-  });
+  // v6.5: 固定等 1.5s 改为轮询保存状态（300ms×5）
+  let saved = false;
+  for (let i = 0; i < 5 && !saved; i++) {
+    saved = await page.evaluate(new Function(`
+      const row = (${aiSourceRowLocateExpr()});
+      return !!row && /内容由AI生成/.test(row.textContent || '');
+    `));
+    if (!saved) await page.waitForTimeout(300);
+  }
   if (saved) log('创作来源 ✓（内容由AI生成）');
   else { log('⚠️  创作来源保存状态未确认，请后台检查'); await dumpProbe('ai-source'); }
 }
@@ -483,11 +626,11 @@ if (cover && fs.existsSync(cover)) await uploadCover(cover);
 const saveBtn = page.locator('button:has-text("保存为草稿"), [role="button"]:has-text("保存为草稿"), button:has-text("保存"):not(:has-text("群发"))').first();
 try {
   await saveBtn.click({ timeout: 10_000 });
-  await page.waitForTimeout(3000);
   log('已点击「保存为草稿」✓');
 } catch { log('⚠️  保存按钮没点到，请手动点「保存为草稿」'); }
 
 // 9) 等保存完成（宽松等待，期间用户可手动补封面/摘要）
+// v6.5: 删掉点击后固定等 3s——下方 waitForFunction 本身就是条件等待，重复等待
 try {
   await page.waitForFunction(() => {
     const t = document.body.innerText;
@@ -500,11 +643,25 @@ await page.screenshot({ path: shotPath, fullPage: false });
 log('截图: ' + shotPath);
 log('✅ 请到公众号后台/手机预览确认（标题、正文、封面齐全），然后人工点「发表」，并勾选「内容由 AI 生成」声明。');
 await browser.close();
+// v6.5: 发布成功后自动清理垃圾（旧发布截图/过期probe诊断/续编url/一次性截图脚本），失败不影响本次结果
+try {
+  const { runCleanup } = await import('./cleanup.mjs');
+  const removed = runCleanup({ keep: 5 });
+  log('垃圾清理 ✓（' + removed + ' 个旧文件）');
+} catch {}
 process.exit(0);
 
 async function die(msg) {
   await page.screenshot({ path: shotPath }).catch(() => {});
   log('❌ ' + msg + '，截图: ' + shotPath);
+  // v6.4: 失败时导出当前编辑页 URL（含 draft id 的话可用于续编，不必从零重跑），
+  //       并提示草稿箱残留——公众号编辑器会自动保存，失败重跑成功后记得删同名旧草稿。
+  try {
+    const url = page.url();
+    fs.writeFileSync(shotPath.replace(/\.png$/, '-url.txt'), url);
+    log('当前编辑页 URL 已存: ' + shotPath.replace(/\.png$/, '-url.txt') + '（含 draft id 可续编）');
+  } catch {}
+  log('注意：编辑器会自动保存，本次不完整草稿可能已在草稿箱——重跑成功后删除同名旧草稿，避免重复。');
   log('兜底方案：剪贴板里已有排版 HTML，人工打开后台粘贴发布；或改用 playwright MCP 交互式完成。');
   await browser.close();
   process.exit(1);
