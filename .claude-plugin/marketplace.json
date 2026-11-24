@@ -3,7 +3,7 @@
   "owner": {
     "name": "justonescc"
   },
-  "description": "个人 Claude Code 插件市场:Playwright E2E 测试流水线、公众号自动发布等工程效能插件",
+  "description": "个人 Claude Code 插件市场:Playwright E2E 测试流水线等工程效能插件",
   "plugins": [
     {
       "name": "wl-e2e",
@@ -13,7 +13,7 @@
     {
       "name": "wechat-publisher",
       "source": "./plugins/wechat-publisher",
-      "description": "微信公众号自动写稿与发布:定位写稿 → 违禁词自检 → Markdown 转公众号 HTML → Playwright 写入草稿箱,群发永远人工点击"
+      "description": "微信公众号自动写稿与发布 v1.1.0:写稿(事实核查/违禁词自检) → 排版 → 封面卡自动生成上传 → 原创声明与AI来源声明自动化 → 草稿箱,群发永远人工"
     }
   ]
 }
