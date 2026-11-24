@@ -18,6 +18,7 @@ description: 微信公众号自动写稿与发布。当用户要写公众号文�
 ## 1. 写稿
 
 - **事实核查（硬性）**：正文里的数据、玩法名、版本内容必须 **≥2 个独立来源交叉核实**（官方公告 > 攻略站当日文 > 社区帖）；搜到但无法交叉验证的爆料词**一律不进正文**。踩过的坑：基于未证实爆料写的草稿（如臆测玩法名）会整篇作废重写。
+- **核查 GitHub 开源项目走 `gh api`**（2026-11-24 实测）：WebFetch 对 github.com/raw.githubusercontent.com 会被网络策略挡——`gh api repos/<owner>/<repo>` 拿 star/license，`gh api repos/<owner>/<repo>/contents/<path> --jq '.content' | base64 -d` 直接读 SKILL.md/README 原文（一手来源，比抓网页准），安装命令以仓库 README/marketplace.json 原文为准。
 - 字数 800~1500；结构：**开头钩子（3 句内抓住人）→ 小标题分段 → 结尾引导在看/关注**。
 - 标题 ≤30 字，输出 3 个候选让用户挑（用户指定了就只用指定的）。
 - 摘要 ≤120 字。
@@ -75,7 +76,16 @@ node "$SKILL/scripts/publish.mjs" "$WP_DATA/drafts/xxx.html" --resume "$WP_DATA/
 - 成功保存草稿后输出截图路径。**到此为止**：提醒用户到手机/后台预览，确认无误后**人工点群发**，并勾选「内容由 AI 生成」声明。
 - **垃圾自动清理**：发布成功后脚本自动调 cleanup.mjs——旧发布截图与过期 probe 诊断只保留最新 5 个，续编 `-url.txt`、一次性截图脚本、过时软链全删；正式产物（草稿 md/html、cards 卡片）永不碰。手动清理/预览：`node "$SKILL/scripts/cleanup.mjs" [--keep 5] [--dry-run]`。
 - **任何情况下不代替用户点「群发」按钮**。
-- 脚本失败（公众号改版等）：改用 playwright MCP 工具交互式完成同样步骤（登录 → 新建图文 → 填标题/正文 → 保存草稿），并顺手修 `publish.mjs` 里失效的选择器（修完把改动沉淀回插件仓库）。
+- 脚本失败（公众号改版等）：改用 playwright MCP 工具交互式完成同样步骤（登录 → 新建图文 → 填标题/正文 → 保存草稿），并顺手修 `publish.mjs` 里失效的选择器（修完把改动沉淀回插件仓库）。**接管前先判系统性还是偶发**：同版本脚本当天早些时候成功过 → 多为时序/环境偶发，直接 MCP 接管完成发布，别当场大改脚本；连续多次同一步骤挂才是改版信号。
+- **MCP 接管 playbook（2026-11-24 v1.2.1 全程实测走通，编辑器 type=77）**：
+  1. **先截图判读现场，⚠️≠全丢**：`publish-*.png` 是失败瞬间截图——这次「原创声明状态未确认」实为弹层已开、类型/作者已填，只差协议勾选。浏览器随脚本退出已关，内容靠编辑器自动保存的 appmsgid 草稿兜底。
+  2. **免扫码**：MCP playwright 浏览器 profile 自带公众号登录态，导航 `mp.weixin.qq.com` 直达首页（publish.mjs 不落盘原则不变——那是用户自己浏览器 profile 的登录态，勿往脚本里缓存）。「文章」入口点击后编辑页开在新标签页，记得 `browser_tabs` 切过去。
+  3. **页面有两个 `.ProseMirror`**：第一个（高 ~30px）是**标题框**，`querySelector('.ProseMirror')` 会把正文贴进标题框——正文必须选「高度>100px」的实例。粘贴用 ClipboardEvent+DataTransfer 派发 `text/html`，md2wx 产物的内联样式全保留（实测 17 p/6 strong/4 h2 无损）。
+  4. **run_code_unsafe 沙箱无 `require`**：读不了本地 HTML——大内容用 node 把内容 JSON.stringify 进脚本文件，再 `filename` 参数加载。**生成的脚本只放单个步骤**：这次文件里带了标题输入，与已执行步骤重复，标题打了两遍。填错就地修：聚焦标题框 → Range selectNodeContents 全选 → Backspace → 真实键盘重打。
+  5. **原创弹层**（入口 `.js_original_apply` 开关，弹层 `.claim__original-dialog`）：作者框 `keyboard.type` 后计数器在动（6/8）但点「确定」仍报「作者不能为空」——成功路径：真实键入 → **点弹层标题空白触发 blur** → 再点确定。协议勾选是 `i.weui-desktop-icon-checkbox` 自定义图标，只认 `page.mouse` 坐标点击（elementFromPoint 定位）；隐藏 input 的 `checked` 不反映 UI 态，**判状态以截图为准**。弹层里 evaluate 合成 `btn.click()` 不触发框架 handler——一律 `page.mouse`。页面另有视口外隐藏 `#author`，不是校验源，别浪费时间填。
+  6. **创作来源（AI 声明）在新编辑器是 checkbox**：`.js_claim_source`（input 藏在 x=-13587），对 input 原生 `.click()` 即生效、无确认弹层——上条 v6.3 的「radio+确认弹层」交互仅 publish.mjs 自己的页面还适用。
+  7. **MCP 全局拦截 filechooser**：run_code 里 `waitForEvent('filechooser')` 永远收不到且代码中断（挂 Modal state）——触发 `input.click()` 后让代码停住，用 `browser_file_upload` 工具应答。上传后新图自动带 `selected` class，且 type=77 弹层的 item text **含文件名**（v6.2 的「不含文件名」在此不成立）——文件名硬匹配优先，src 差集兜底，仍不盲选第一项。
+  8. **保存验证**：点「保存为草稿」后状态栏「已保存」时间戳可能不刷新，**以首页「近期草稿」更新时间为准**。
 - **排障：编辑页报「系统错误(320003)」**= 编辑会话/token 失效。回到 `mp.weixin.qq.com` 首页（会自动恢复登录态），从首页/草稿箱重新进编辑页即可，token 一般不变；不要反复硬刷同一个报错 URL。
 - **失败重跑注意**：编辑器会自动保存，失败的那次运行很可能已在草稿箱留了**不完整同名草稿**——优先用 `--resume` 续编那份草稿（URL 已由脚本存成 `-url.txt`，直接传文件路径即可），标题/正文/摘要/封面/原创/AI来源已设置的会自动跳过；若从零重跑，成功后记得去草稿箱删同名旧草稿（v6 实测踩过：同标题草稿攒了两份，封面错的留着没用）。续编时**不要再传 `--img-top/--img-end`**（除非确实是配图缺失，否则会重复插图）。
 
