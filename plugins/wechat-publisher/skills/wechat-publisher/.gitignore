@@ -1,5 +1,6 @@
 node_modules/
-package-lock.json
+# package-lock.json 必须入库：锁定 playwright@1.60.0 匹配本地 chromium-1223 缓存，
+# 否则 npm install 拉最新版会要求下载 chromium-1255（2026-11-24 v1.2.0 升级踩坑）
 
 # 个人账号定位配置（提交模板 example 即可）
 config/profile.yaml

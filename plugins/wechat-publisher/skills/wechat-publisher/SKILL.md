@@ -7,6 +7,7 @@ description: 微信公众号自动写稿与发布。当用户要写公众号文�
 
 代码目录（插件安装处，下称 `$SKILL`，勿手改，升级会被覆盖）。
 状态目录：`~/.wechat-publisher/`（下称 `$WP_DATA`）——账号定位、草稿、截图都存这里，**插件升级不丢**。
+依赖：脚本要 `$SKILL/node_modules`（playwright@1.60.0 锁死本地 chromium-1223 缓存，**勿升 playwright 版本**——新版会要求下载 chromium-1255）。插件升级出新目录后依赖不会自动带过来：从旧版本目录拷 `node_modules` + `package-lock.json`（lock 已入库），或在 `$SKILL` 下 `npm ci`，缺依赖报 `Cannot find package 'playwright'` 即此因。
 
 ## 0. 前置检查
 
