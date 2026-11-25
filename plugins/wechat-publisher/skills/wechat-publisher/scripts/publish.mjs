@@ -8,6 +8,14 @@
 //     js_imagedialog 多实例取浮层内可见者；上传完成判据=图片列表项数量增加；选图→下一步→裁剪确认）
 // v6: 新增 --original（文字原创声明）与 --ai-source（创作来源标「内容由AI生成」）；
 //     原创作者栏 js_counter 校验依赖 keydown/keyup+blur 事件链，fill 类 API 不触发（2026-11-24 实测）
+// v6.7: ① 封面认图失败不再 return 放弃：picked 返回 {clicked,src}（修 img 未渲染返回 '' 被误判），
+//       没认出也继续点「下一步」→「确认」，成功判定仍靠封面预览+src 比对兜底
+//       ② 保存前点掉残留可见弹窗，防「保存为草稿」被挡
+// v6.8: 原创弹窗协议框改行为探测（2026-11-25 两轮实测定稿）——协议默认【未勾】（v6.7 按
+//       「默认已勾别碰」跑挂了：确定无效→弹窗滞留→全链失败；第一轮绿勾是 v6.6 点的，非默认态），
+//       input.checked 回读恒 false（自定义组件无原生 checkbox）无法「检查勾选态」。
+//       定稿流程（用户拍板顺序）：填作者 → 点「确定」（锁定含协议文本的弹窗容器内）→
+//       弹窗没关 = 没勾 → 补勾「我已阅读并同意」→ 再确定。已勾场景永不误碰协议框。
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -114,6 +122,15 @@ log('已进入编辑页 ✓');
 // 诊断模式：只导出编辑页结构（封面区/图片工具栏），不填写不保存
 if (probeOnly) {
   await dumpProbe('entry');
+  if (args.includes('--probe-picker')) {
+    // v6.6 诊断：只打开图片库弹层导出结构，不填内容不保存（不留残留草稿）
+    const ok = await openCoverPicker();
+    log(ok ? '图片库弹层已打开，导出结构 ✓' : '弹层未打开，导出当前结构');
+    await dumpProbe('picker');
+    await page.screenshot({ path: path.join(DATA, 'drafts', `probe-picker-${Date.now()}.png`), fullPage: false });
+    await browser.close();
+    process.exit(0);
+  }
   await page.screenshot({ path: path.join(DATA, 'drafts', `probe-shot-${Date.now()}.png`), fullPage: true });
   log('诊断模式结束（未填写、未保存）');
   await browser.close();
@@ -178,6 +195,34 @@ async function dumpProbe(tag) {
         coverPreview: !!document.querySelector('#js_cover_area img, .js_cover_preview_new img, .select-cover__preview img'),
         coverNullPop: !!document.querySelector('.js_cover_null_pop, .js_imagedialog'),
         buttons: [...document.querySelectorAll('button,a,[title],[aria-label],[class*="edui"]')].slice(0, 60).map(pick),
+        // v6.6 诊断增强：保存按钮单独全量导出（原先被 slice(0,60) 截断，导致「保存按钮没点到」无据可查）；
+        //           图片库 item 结构全量导出（定位「认不出新图」的判据失效根因）。
+        saveBtns: [...document.querySelectorAll('button,a,[role="button"],[class*="btn"],[class*="edui-btn"]')]
+          .filter((el) => /保存|草稿|存为|存草稿/.test(el.innerText || ''))
+          .map((el) => ({ ...pick(el), txt: (el.innerText || '').trim().slice(0, 30) })),
+        picker: (() => {
+          const items = [...document.querySelectorAll('.weui-desktop-img-picker__item')];
+          return {
+            count: items.length,
+            visible: items.filter((i) => i.offsetParent !== null).length,
+            sample: items.slice(0, 12).map((i) => {
+              const img = i.querySelector('img');
+              const r = i.getBoundingClientRect();
+              return {
+                cls: (i.className || '').toString().slice(0, 80),
+                src: img ? img.getAttribute('src') : null,
+                dataSrc: img ? img.getAttribute('data-src') : null,
+                hasImg: !!img,
+                visible: i.offsetParent !== null,
+                w: Math.round(r.width), h: Math.round(r.height),
+                html: i.outerHTML.slice(0, 240),
+              };
+            }),
+          };
+        })(),
+        dialogs: [...document.querySelectorAll('.weui-desktop-dialog,.js_imagedialog,.weui-desktop-mask,.js_cover_null_pop')]
+          .map((el) => ({ cls: (el.className || '').toString().slice(0, 90), visible: el.offsetParent !== null, txt: (el.innerText || '').slice(0, 60) })),
+        coverAreaHtml: ((document.querySelector('#js_cover_area') || {}).outerHTML || '').slice(0, 600),
         frames: [...document.querySelectorAll('iframe')].map((f) => f.src),
         // 封面区：含「封面」字样的叶子节点 + class 含 cover/upload 的元素
         coverText: [...document.querySelectorAll('*')].filter((el) => leaf(el) && /封面/.test(el.innerText || '')).slice(0, 20).map(pick),
@@ -334,10 +379,8 @@ async function coverPreviewVisible() {
     return await page.locator('#js_cover_area img, .js_cover_preview_new img, .select-cover__preview img').first().isVisible({ timeout: 2000 });
   } catch { return false; }
 }
-async function uploadCover(cover) {
-  // 已有封面（更换场景）直接跳过
-  if (await coverPreviewVisible()) { log('封面已存在 ✓（未更换）'); return; }
-
+// v6.6: 打开「封面区 → 从图片库选择」弹层，返回是否成功。抽成独立函数，供发布流程与 --probe-picker 诊断复用。
+async function openCoverPicker() {
   // v5: 打开封面选择浮层。注意 .js_imagedialog 在正文插图菜单里有同名元素，
   //     必须判断浮层上下文里 offsetParent 非空的实例，否则会误判「弹层没打开」。
   let opened = false;
@@ -357,7 +400,7 @@ async function uploadCover(cover) {
   if (!opened) {
     log('⚠️  封面选择弹层没打开，请在「封面和摘要」区手动选封面');
     await dumpProbe('cover-open');
-    return;
+    return false;
   }
 
   // 进图片库弹层（点浮层里可见的那个「从图片库选择」）
@@ -372,8 +415,16 @@ async function uploadCover(cover) {
   if (!imgDlgReady) {
     log('⚠️  图片库弹层没打开，请手动选封面');
     await dumpProbe('cover-imglib-open');
-    return;
+    return false;
   }
+  return true;
+}
+
+async function uploadCover(cover) {
+  // 已有封面（更换场景）直接跳过
+  if (await coverPreviewVisible()) { log('封面已存在 ✓（未更换）'); return; }
+
+  if (!await openCoverPicker()) return;
 
   // 记录上传前的图片列表项数量与 src 集合：数量变化判断上传完成，src 差集找出新图（防选错旧图）
   const countBefore = await page.evaluate(() => document.querySelectorAll('.weui-desktop-img-picker__item').length);
@@ -426,7 +477,11 @@ async function uploadCover(cover) {
 
   // v6.2 修复：选中「刚上传的那张」——按上传前后 src 差集找新图，文件名匹配仅作兜底。
   //     旧逻辑 fallback 盲选列表第一项，图片库里有历史图时会选中旧图
-  //     （v6.2 实测：封面被选成上一篇的旧封面卡）。认不出新图就报失败，绝不盲选。
+  //     （v6.2 实测：封面被选成上一篇的旧封面卡）。绝不盲选列表第一项。
+  // v6.7（2026-11-25 用户拍板）：认图失败【不要 return 放弃】——上传完成点「下一步」→「确认」。
+  //     两个原因：① picked 命中但 img 未渲染完时旧代码返回 ''，被 !picked 误判成「没找到」，
+  //     实际已点中（返回值改成 {clicked, src} 区分）；② 微信上传后新图常带选中态/自动预填，
+  //     中断反而把已选好的流程掐断。最终成功判定仍以封面预览 + src 比对兜底，不会静默选错。
   const fname = path.basename(cover);
   let newSrc = '';
   const picked = await page.evaluate(({ name, befores }) => {
@@ -439,15 +494,14 @@ async function uploadCover(cover) {
     if (!hit) return null;
     (hit.querySelector('img') || hit).click();
     const img = hit.querySelector('img');
-    return img ? img.getAttribute('src') : '';
+    return { clicked: true, src: img ? img.getAttribute('src') : '' };
   }, { name: fname, befores: srcsBefore });
-  if (!picked) {
-    log('⚠️  图片库里没认出刚上传的封面（为防选错图已放弃盲选），请手动选封面');
-    await dumpProbe('cover-pick');
-    return;
+  if (picked) {
+    newSrc = picked.src || '';
+    await page.waitForTimeout(400); // 选中态是同步 class 切换，短等即可
+  } else {
+    log('⚠️  图片库里没认出刚上传的封面（不中断，按当前选中态继续下一步）');
   }
-  newSrc = picked;
-  await page.waitForTimeout(400); // 选中态是同步 class 切换，短等即可
   const nextBtn = page.locator('.weui-desktop-dialog button:has-text("下一步")').first();
   if (await nextBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
     await nextBtn.click({ timeout: 5_000 });
@@ -525,13 +579,14 @@ async function declareOriginal(authorName) {
     if (cbVisible) break;
     await page.waitForTimeout(200);
   }
-  // 勾「我已阅读并同意《微信公众平台原创声明及相关功能使用协议》」
-  await page.evaluate(() => {
-    const cbs = [...document.querySelectorAll('input[type=checkbox]')].filter((c) => c.offsetParent !== null);
-    const cb = cbs.find((c) => { const box = c.closest('div, p, label, td'); return box && /原创声明及相关功能使用协议/.test(box.textContent || ''); }) || cbs[0];
-    if (cb && !cb.checked) cb.click();
-  });
-  await page.waitForTimeout(300); // v6.5: 500→300，同步勾选状态
+  // v6.8（2026-11-25 与用户讨论定稿，行为探测）：协议勾选框默认【未勾】（第二轮实测——
+  //       第一轮截图的绿勾是 v6.6 点出来的，不是默认态），且回读 input.checked 恒 false
+  //       （自定义组件无原生 checkbox，probe 证实）——「检查是否勾选」无法靠 DOM 判据实现。
+  //       改为结果导向探测：先填作者（用户拍板顺序），点「确定」——弹窗关了 = 协议已勾、
+  //       一步到位且绝不误碰；弹窗没关 = 协议没勾 → 补勾「我已阅读并同意」→ 再点确定。
+  //       「确定」必须锁定在含协议文本的原创弹窗容器内找：页面有多个隐藏弹层各自的
+  //       「确定」，裸 .first() 会点到别的弹层（2026-11-25 第一轮实测：绿勾+作者已填但
+  //       弹窗滞留）。
   // 作者栏（≤8字），填完补事件链让校验 state 生效
   const inp = page.locator('#js_original_edit_box input[placeholder="请输入作者"]');
   try {
@@ -546,15 +601,33 @@ async function declareOriginal(authorName) {
     });
   } catch { log('⚠️  原创作者栏填写失败，请后台手动补'); }
   await page.waitForTimeout(300); // v6.5: 500→300
-  // 「确定」可能触发协议确认层，循环点两次
-  for (let i = 0; i < 2; i++) {
-    const ok = page.locator('button:has-text("确定")').first();
-    if (await ok.isVisible({ timeout: 3_000 }).catch(() => false)) {
+  // v6.8 行为探测：先点「确定」试关闭；没关 = 协议没勾 → 补勾 → 再确定（最多两轮补勾）
+  const dlgLoc = () => page.locator('.weui-desktop-dialog').filter({ hasText: '我已阅读并同意' });
+  const dlgOpen = async () => await dlgLoc().first().isVisible({ timeout: 1_000 }).catch(() => false);
+  const clickOk = async () => {
+    const ok = dlgLoc().locator('button:has-text("确定")').first();
+    if (await ok.isVisible({ timeout: 2_000 }).catch(() => false)) {
       await ok.click({ timeout: 3_000 }).catch(() => {});
-      await page.waitForTimeout(500); // v6.5: 1500→500，下一轮 isVisible(3s) 自带等待兜底
+      await page.waitForTimeout(800); // 等弹窗关闭动画/校验响应
     }
-  }
-  const done = await page.evaluate(() => /已声明|已开启快捷转载/.test(document.body.textContent));
+  };
+  const agreeThenOk = async () => {
+    await page.evaluate(() => {
+      const cands = [...document.querySelectorAll('label, span, p, div, a')]
+        .filter((e) => e.offsetParent !== null && /我已阅读并同意/.test(e.textContent || '') && (e.textContent || '').length < 80);
+      cands.sort((a, b) => a.textContent.length - b.textContent.length);
+      if (cands.length) {
+        const el = cands[0];
+        try { (el.closest('label') || el.parentElement || el).click(); } catch { /* 点不动靠下一轮暴露 */ }
+      }
+    });
+    await page.waitForTimeout(400); // 等勾选态生效
+    await clickOk();
+  };
+  await clickOk(); // 第一发：协议已勾场景一步到位，永不误碰协议框
+  for (let i = 0; i < 2 && (await dlgOpen()); i++) await agreeThenOk(); // 没关 = 没勾，补勾再确定
+  const done = !(await dlgOpen()) &&
+    await page.evaluate(() => /已声明|已开启快捷转载/.test(document.body.textContent));
   if (done) log('原创声明 ✓（文字原创 · ' + authorName.slice(0, 8) + '）');
   else { log('⚠️  原创声明状态未确认，请后台检查'); await dumpProbe('original'); }
 }
@@ -621,6 +694,19 @@ if (aiSource) await declareAiSource();
 
 // 7) 封面（可选，必须在保存草稿之前完成）
 if (cover && fs.existsSync(cover)) await uploadCover(cover);
+
+// v6.8 保存前兜底：若仍有可见设置弹窗滞留（原创/创作来源），点掉其「确定/确认」再保存
+//      （2026-11-25 实测：弹窗滞留挡住「保存为草稿」；按钮要锁定在弹窗容器内找，裸 .first()
+//      会命中页面上其他隐藏弹层的同名按钮）
+await page.evaluate(() => {
+  const dlg = [...document.querySelectorAll('.weui-desktop-dialog')]
+    .find((d) => d.offsetParent !== null && /我已阅读并同意|内容由AI生成/.test(d.textContent || ''));
+  if (!dlg) return;
+  const btn = [...dlg.querySelectorAll('button')]
+    .find((b) => /确\s*定|确\s*认/.test(b.textContent || ''));
+  if (btn) btn.click();
+});
+await page.waitForTimeout(500);
 
 // 8) 保存为草稿（新版按钮文案）
 const saveBtn = page.locator('button:has-text("保存为草稿"), [role="button"]:has-text("保存为草稿"), button:has-text("保存"):not(:has-text("群发"))').first();

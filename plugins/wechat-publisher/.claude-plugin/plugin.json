@@ -1,5 +1,5 @@
 {
   "name": "wechat-publisher",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "微信公众号自动写稿与发布:按账号定位写稿 → 事实核查 → 违禁词自检 → Markdown 转公众号 HTML → Playwright 写入草稿箱(封面/原创声明/AI来源声明全自动化,失败可切 playwright MCP 接管(带 playbook)),群发永远由用户人工点击,运行状态外置 ~/.wechat-publisher 升级不丢"
 }
